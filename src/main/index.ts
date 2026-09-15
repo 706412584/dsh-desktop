@@ -3,6 +3,7 @@ import { checkBlockingPluginUpdates, selectPluginRecoveryTarget, PluginRecoveryE
 import { spawn } from 'node:child_process'
 import { join } from 'node:path'
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { pathToFileURL } from 'node:url'
 import { parse } from 'yaml'
 import {
   app,
@@ -389,7 +390,16 @@ function installMainWindowRendererRecovery(window: BrowserWindow): void {
     event.preventDefault()
     const reason = details?.reason ?? 'unknown'
     const exitCode = details?.exitCode ?? -1
-    recordMainWindowRendererLoss('render-process-gone', `reason=${reason} exitCode=${exitCode}`)
+    const currentUrl = (() => {
+      try { return webContents.getURL() } catch { return '' }
+    })()
+    const gpuStatus = (() => {
+      try { return JSON.stringify(app.getGPUFeatureStatus()) } catch { return '' }
+    })()
+    recordMainWindowRendererLoss(
+      'render-process-gone',
+      `reason=${reason} exitCode=${exitCode}${currentUrl ? ` url=${currentUrl}` : ''}${gpuStatus ? ` gpu=${gpuStatus}` : ''}`
+    )
     // `did-finish-load` can win the race by milliseconds before a broken
     // graphics stack takes the renderer down. The first post-render crash is
     // allowed the normal bounded reload; if that freshly reloaded renderer
@@ -501,7 +511,7 @@ function attachWindowsMenuView(window: BrowserWindow): void {
   window.on('leave-full-screen', updateBounds)
   window.on('blur', () => setWindowsMenuOpen(window, false, true))
 
-  void menuView.webContents.loadFile(desktopResourcePath('windows-menu.html'), {
+  void loadDesktopResource(menuView.webContents, desktopResourcePath('windows-menu.html'), {
     query: {
       locale: harnessLocale(),
       theme: windowsMenuDark ? 'dark' : 'light'
@@ -617,6 +627,26 @@ function harnessNodeEntryPath(): string {
 
 function desktopResourcePath(name: string): string {
   return app.isPackaged ? join(process.resourcesPath, name) : join(app.getAppPath(), 'build', name)
+}
+
+async function loadDesktopResource(
+  target: {
+    loadURL: (url: string) => Promise<void>
+    loadFile: (file: string, options?: { query?: Record<string, string> }) => Promise<void>
+  },
+  filePath: string,
+  options?: { query?: Record<string, string> }
+): Promise<void> {
+  const query = options?.query ?? {}
+  try {
+    const fileUrl = pathToFileURL(filePath)
+    for (const [key, value] of Object.entries(query)) {
+      fileUrl.searchParams.set(key, value)
+    }
+    await target.loadURL(fileUrl.href)
+  } catch {
+    await target.loadFile(filePath, options)
+  }
 }
 
 function desktopIconPath(): string {
@@ -997,6 +1027,10 @@ function createWindow(): BrowserWindow {
     event.preventDefault()
     window.hide()
   })
+  window.on('session-end', () => {
+    desktopDiagnostics?.markCleanExit()
+    desktopStorageManager?.flushSync()
+  })
   window.on('page-title-updated', (event) => {
     event.preventDefault()
     window.setTitle('')
@@ -1154,7 +1188,7 @@ async function showSplash(): Promise<void> {
   const window = mainWindow && !mainWindow.isDestroyed() ? mainWindow : createWindow()
   const navigationVersion = ++mainWindowNavigationVersion
   window.webContents.stop()
-  await window.loadFile(desktopResourcePath('splash.html'), {
+  await loadDesktopResource(window, desktopResourcePath('splash.html'), {
     query: { theme: nativeTheme.shouldUseDarkColors ? 'dark' : 'light' }
   })
   if (window.isDestroyed() || navigationVersion !== mainWindowNavigationVersion) return
@@ -1174,13 +1208,31 @@ async function reportProfileConsistency(dshHome: string): Promise<void> {
     if (healed.length > 0) {
       runtime.note(`[desktop] auto-composed ${healed.length} missing bundle(s): ${healed.join(', ')}`)
     }
-    const findings = await inspectProfileConsistency(dshHome)
-    const store = await inspectStoreConsistency(dshHome)
-    if (store) findings.push(store)
-    for (const finding of findings) runtime.note(`[desktop] profile inconsistency: ${finding}`)
-  } catch {
-    // A profile that cannot be inspected is not a reason to refuse a launch.
+  } catch (error) {
+    runtime.note(
+      `[desktop] bundle healing skipped: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    )
   }
+
+  // Defer heavy recursive inspections of the profiles directory and package store
+  // so they run asynchronously without blocking the startup launch pipeline.
+  void Promise.all([
+    inspectProfileConsistency(dshHome),
+    inspectStoreConsistency(dshHome)
+  ])
+    .then(([findings, store]) => {
+      if (store) findings.push(store)
+      for (const finding of findings) runtime.note(`[desktop] profile inconsistency: ${finding}`)
+    })
+    .catch((error) => {
+      runtime.note(
+        `[desktop] profile consistency inspection failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      )
+    })
 }
 
 /**
@@ -1367,8 +1419,17 @@ function launchHarness(): Promise<void> {
     maintenanceAllowedRestoreId = undefined
     runtime.note('[desktop] profile maintenance done')
     await refreshMigrationRecoveryLock(dshHome)
-    await auditInstalledLaunchAgents(dshHome)
-    runtime.note('[desktop] LaunchAgent audit done')
+    void auditInstalledLaunchAgents(dshHome)
+      .then(() => {
+        runtime.note('[desktop] LaunchAgent audit done')
+      })
+      .catch((error) => {
+        runtime.note(
+          `[desktop] LaunchAgent audit failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        )
+      })
     desktopStorageManager?.switchProfile(join(dshHome, 'profiles', 'web'))
     await runtime.start(launchDirectory)
 
@@ -1755,7 +1816,7 @@ async function waitForPluginRecoveryAction(options: {
   window.webContents.stop()
 
   try {
-    await window.loadFile(desktopResourcePath('plugin-recovery.html'), {
+    await loadDesktopResource(window, desktopResourcePath('plugin-recovery.html'), {
       query: {
         state: JSON.stringify(state),
         icon: app.isPackaged ? 'icon.png' : 'app-icon.png',
@@ -2094,7 +2155,7 @@ async function waitForSafeModeAction(options: {
   })
   window.webContents.stop()
   try {
-    await window.webContents.loadFile(desktopResourcePath('safe-mode.html'), {
+    await loadDesktopResource(window.webContents, desktopResourcePath('safe-mode.html'), {
       query: {
         state: JSON.stringify(model),
         icon: app.isPackaged ? 'icon.png' : 'app-icon.png',
@@ -3105,6 +3166,7 @@ if (isDaemonLaunch(process.env, process.platform)) {
       if (process.platform !== 'darwin') app.quit()
     })
     app.on('before-quit', (event) => {
+      desktopDiagnostics?.markCleanExit()
       if (quitting || !runtime) return
       event.preventDefault()
       quitting = true
