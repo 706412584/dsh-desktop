@@ -271,9 +271,9 @@
     "@deepseek-ai/schemastery": "3.18.2",
     "dsh-desktop-client-ui": "file:packages/dsh-desktop-client-ui",
     "dsh-desktop-hmr-fallback": "file:packages/dsh-desktop-hmr-fallback",
+    "dsh-desktop-log-bridge": "file:packages/dsh-desktop-log-bridge",
     "dsh-desktop-market-installer": "file:packages/dsh-desktop-market-installer",
     "dsh-desktop-preset-transfer": "file:packages/dsh-desktop-preset-transfer",
-    "dshmarket": "1.45.1",
     "electron-updater": "^6.8.9",
     "node": "24.9.0",
     "pnpm": "10.34.5",
@@ -288,6 +288,7 @@
     "@types/node": "24.10.1",
     "@types/qrcode": "^1.5.6",
     "@types/ws": "^8.18.1",
+    "dshmarket": "1.45.1",
     "electron": "43.4.0",
     "electron-builder": "26.15.3",
     "electron-vite": "5.0.0",
@@ -370,6 +371,10 @@
         "to": "dsh-desktop.patch.yml"
       },
       {
+        "from": "build/dsh-desktop-market.patch.yml",
+        "to": "dsh-desktop-market.patch.yml"
+      },
+      {
         "from": "build/dsh-desktop-safe.patch.yml",
         "to": "dsh-desktop-safe.patch.yml"
       },
@@ -397,6 +402,7 @@
         "from": "build/safe-mode.html",
         "to": "safe-mode.html"
       },
+
       {
         "from": "build/community-wechat-qr.png",
         "to": "community-wechat-qr.png"
