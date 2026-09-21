@@ -58,6 +58,7 @@ import {
 } from './state/profile-compatibility'
 import { ensureStoreDirPinned, inspectStoreConsistency } from './state/profile-store'
 import { LanMobileBridge } from './mobile/lan-mobile-bridge'
+import { createFilePairingPinStore, pairingPinStorePath } from './mobile/pairing-pin-store'
 import {
   detectPluginRecovery,
   PLUGIN_RECOVERY_EVIDENCE_TIMEOUT_MS
@@ -3246,7 +3247,7 @@ async function showMobilePairing(): Promise<void> {
     return
   }
 
-  if (!snapshot.pairingUrl && !snapshot.tunnelActive) {
+  if (!snapshot.pairingUrl && !snapshot.tunnelActive && !snapshot.connected) {
     snapshot = await mobileBridge.toggleTunnel(true)
   }
 
@@ -3273,7 +3274,9 @@ async function showMobilePairing(): Promise<void> {
     mobileWindow = undefined
   })
   if (!snapshot.desktopUrl) return
-  await mobileWindow.loadURL(snapshot.desktopUrl)
+  const desktopUrl = mobileBridge.createDesktopUrl()
+  if (!desktopUrl) return
+  await mobileWindow.loadURL(desktopUrl)
   mobileWindow.show()
   mobileWindow.focus()
 }
@@ -3347,7 +3350,8 @@ async function bootstrap(): Promise<void> {
     onReconnectRequested: () => {
       void showMobilePairing().catch(showUnexpectedError)
     },
-    onConnectedChange: (connected) => broadcastMobileStatus(connected)
+    onConnectedChange: (connected) => broadcastMobileStatus(connected),
+    pairingPinStore: createFilePairingPinStore(pairingPinStorePath(app.getPath('userData')))
   })
   if (!startInSafeMode) void mobileBridge.start().catch(showUnexpectedError)
   repairAgentService = new RepairAgentService({
