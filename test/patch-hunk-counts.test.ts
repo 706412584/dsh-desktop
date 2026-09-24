@@ -43,7 +43,7 @@ describe('patch hunk counts', () => {
       path.join(projectRoot, 'patches/@deepseek-ai+dsh+0.1.5-rc.2.patch'),
       'utf8'
     )
-    const broken = patch.replace('@@ -28,6 +28,13 @@', '@@ -28,6 +28,12 @@')
+    const broken = patch.replace('@@ -28,6 +28,14 @@', '@@ -28,6 +28,13 @@')
     expect(broken).not.toBe(patch)
     expect(() => parsePatchFile(broken)).toThrow(/hunk header integrity check failed/)
   })
