@@ -1,5 +1,7 @@
 import { checkDesktopUpdate } from '../desktop-service'
 import { isPrereleaseVersion, isVersion } from '../desktop-service/service'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { app, BrowserWindow, ipcMain, powerMonitor } from 'electron'
 import electronUpdater from 'electron-updater'
 import type { UpdateStatus } from '../../shared/contracts'
@@ -7,6 +9,7 @@ import {
   AUTO_INSTALL_ON_APP_QUIT,
   shouldCheckAfterResume,
   supportsAutoUpdates,
+  updatesEnabledForBuild,
   UPDATE_CHECK_INTERVAL_MS,
   UPDATE_STARTUP_DELAY_MS,
   UPDATE_STARTUP_JITTER_MS
@@ -51,6 +54,25 @@ let selectedUpdateVersion: string | undefined
 
 export function getUpdateStatus(): UpdateStatus {
   return { ...status }
+}
+
+/**
+ * Read once: the marker lives in the packaged manifest, which cannot change
+ * while the app is running.
+ */
+let upstreamUpdatesEnabled: boolean | undefined
+
+function upstreamFeedEnabled(): boolean {
+  if (upstreamUpdatesEnabled === undefined) {
+    try {
+      const metadata = JSON.parse(readFileSync(join(app.getAppPath(), 'package.json'), 'utf8'))
+      upstreamUpdatesEnabled = updatesEnabledForBuild(metadata)
+    } catch {
+      // An unreadable manifest must not silently turn updates off.
+      upstreamUpdatesEnabled = true
+    }
+  }
+  return upstreamUpdatesEnabled
 }
 
 export function registerUpdateHandlers(): void {
@@ -107,6 +129,17 @@ export function startUpdateManager(options: { prepareToInstall: () => Promise<vo
     return
   }
 
+  if (!upstreamFeedEnabled()) {
+    // No startup check and no interval: this build carries local changes that an
+    // upstream update would replace. Reported rather than left idle so the
+    // About dialog explains why checking does nothing.
+    transition({
+      type: 'unsupported',
+      message: 'This build does not take upstream updates.'
+    })
+    return
+  }
+
   configureUpdater()
   startupTimer = setTimeout(
     () => void checkForUpdates(),
@@ -123,6 +156,17 @@ export async function checkForUpdates(manual = false): Promise<UpdateStatus> {
         type: 'unsupported',
         message: 'Update checks are only available in installed macOS and Windows builds.'
       },
+      manual
+    )
+    if (manual) scheduleReset()
+    return getUpdateStatus()
+  }
+
+  if (!upstreamFeedEnabled()) {
+    // A manual check must not reach the feed either, otherwise the local build
+    // would still learn about and offer the official release.
+    transition(
+      { type: 'unsupported', message: 'This build does not take upstream updates.' },
       manual
     )
     if (manual) scheduleReset()

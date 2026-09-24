@@ -9,6 +9,7 @@ import {
   AUTO_INSTALL_ON_APP_QUIT,
   shouldCheckAfterResume,
   supportsAutoUpdates,
+  updatesEnabledForBuild,
   UPDATE_CHECK_INTERVAL_MS
 } from '../src/main/update/update-policy'
 
@@ -36,6 +37,26 @@ describe('desktop update policy', () => {
     const now = 20_000_000
     expect(shouldCheckAfterResume(now - UPDATE_CHECK_INTERVAL_MS, now)).toBe(true)
     expect(shouldCheckAfterResume(now - UPDATE_CHECK_INTERVAL_MS + 1, now)).toBe(false)
+  })
+
+  it('keeps upstream updates on unless a build opts out', () => {
+    // The feed URLs are compiled in, so a local build that changed desktop code
+    // has to opt out explicitly; anything unrecognized must stay enabled rather
+    // than quietly stranding a user without updates.
+    expect(updatesEnabledForBuild({})).toBe(true)
+    expect(updatesEnabledForBuild(null)).toBe(true)
+    expect(updatesEnabledForBuild('disabled')).toBe(true)
+    expect(updatesEnabledForBuild({ dshDesktopUpdateFeed: 'stable' })).toBe(true)
+    expect(updatesEnabledForBuild({ dshDesktopUpdateFeed: 'disabled' })).toBe(false)
+  })
+
+  it('marks the locally built package as not taking upstream updates', async () => {
+    const packageJson = JSON.parse(
+      await readFile(path.join(projectRoot, 'package.json'), 'utf8')
+    ) as { build: { extraMetadata?: Record<string, unknown> } }
+
+    expect(packageJson.build.extraMetadata?.dshDesktopUpdateFeed).toBe('disabled')
+    expect(updatesEnabledForBuild(packageJson.build.extraMetadata)).toBe(false)
   })
 })
 
