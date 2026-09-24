@@ -10,9 +10,24 @@ import { setHostPluginEnabled } from '../src/main/state/host-plugin-state'
 const directories: string[] = []
 afterEach(async () => { await Promise.all(directories.splice(0).map(path => rm(path, { recursive: true, force: true }))) })
 
+/**
+ * A temp root in canonical form.
+ *
+ * On a Windows CI runner `os.tmpdir()` can come back in 8.3 short form
+ * (`RUNNER~1`) while `realpath` expands it to the long name (`runneradmin`).
+ * The implementation resolves plugin paths through `createRequire`, which
+ * keeps whichever spelling its base path had, so a root taken straight from
+ * `tmpdir()` produced short-form results that did not string-match the
+ * long-form expectations. Canonicalizing the root once keeps both sides of
+ * every comparison in the same form.
+ */
+async function canonicalTempRoot(): Promise<string> {
+  return realpath(await mkdtemp(join(tmpdir(), 'dsh-host-sources-')))
+}
+
 describe('Desktop host plugin sources', () => {
   it('pins every inserted package to the current Desktop and preserves other patch content', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'dsh-host-sources-'))
+    const root = await canonicalTempRoot()
     directories.push(root)
     const app = join(root, 'app')
     const home = join(root, 'home')
@@ -45,7 +60,7 @@ describe('Desktop host plugin sources', () => {
   })
 
   it('leaves patches without host package insertions untouched', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'dsh-host-sources-'))
+    const root = await canonicalTempRoot()
     directories.push(root)
     const patchPath = join(root, 'patch.yml')
     await writeFile(patchPath, '- insert:\n    - id: local\n      name: file:///tmp/plugin.js\n')
@@ -53,7 +68,7 @@ describe('Desktop host plugin sources', () => {
   })
 
   it('omits a switched-off host insertion while retaining other host sources', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'dsh-host-sources-'))
+    const root = await canonicalTempRoot()
     directories.push(root)
     const app = join(root, 'app')
     const home = join(root, 'home')
@@ -74,7 +89,7 @@ describe('Desktop host plugin sources', () => {
   })
 
   it('writes a derived patch when the only host insertion is disabled by default', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'dsh-host-sources-'))
+    const root = await canonicalTempRoot()
     directories.push(root)
     const patchPath = join(root, 'desktop.patch.yml')
     await writeFile(patchPath, '- insert:\n    - id: image\n      name: dsh-image-generation\n')
@@ -93,7 +108,7 @@ describe('Desktop host plugin sources', () => {
    * to start where no such ancestor exists.
    */
   it('resolves host sources from the packaged layout, not an ancestor install', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'dsh-host-sources-'))
+    const root = await canonicalTempRoot()
     directories.push(root)
     const resources = join(root, 'resources')
     const app = join(resources, 'app')
