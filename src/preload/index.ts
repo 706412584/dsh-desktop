@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type { AvailableRelease, UpdateStatus } from '../shared/contracts'
+import type { DataLocationChoice, DataLocationSnapshot } from '../shared/data-location'
 import { setupDesktopStoragePersistence } from './desktop-storage'
 import {
   isUpdateDismissed,
@@ -569,6 +570,22 @@ contextBridge.exposeInMainWorld(
   'dshWebImport',
   Object.freeze({
     action: (action: string): Promise<{ ok: boolean }> => ipcRenderer.invoke('web-import:action', action)
+  })
+)
+
+/**
+ * Relocating the data directory is a main-process concern: only it can call
+ * `app.setPath`, and only before the window exists. The renderer gets a narrow
+ * surface that reads the current location, asks for a new one through the
+ * native picker, and restarts to apply it.
+ */
+contextBridge.exposeInMainWorld(
+  'dshDataLocation',
+  Object.freeze({
+    get: (): Promise<DataLocationSnapshot> => ipcRenderer.invoke('data-location:get'),
+    choose: (): Promise<DataLocationChoice> => ipcRenderer.invoke('data-location:choose'),
+    reset: (): Promise<DataLocationSnapshot> => ipcRenderer.invoke('data-location:reset'),
+    restart: (): Promise<void> => ipcRenderer.invoke('data-location:restart')
   })
 )
 

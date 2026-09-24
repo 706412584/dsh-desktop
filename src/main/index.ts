@@ -90,6 +90,16 @@ import { SafeModeFrame } from './safe-mode-frame'
 import { desktopResourceUrl, installDesktopProtocol, registerDesktopScheme, SAFE_MODE_PAGE } from './desktop-protocol'
 import { ensureLaunchRoot } from './state/launch-root'
 import {
+  bootstrapDirectory,
+  clearDataLocationRecord,
+  resolveDataLocation,
+  validateDataDirectory,
+  writeDataLocationRecord,
+  type DataLocationFailure,
+  type ResolvedDataLocation
+} from './state/data-location'
+import type { DataLocationChoice, DataLocationSnapshot } from '../shared/data-location'
+import {
   listInstalledProfilePlugins,
   pruneUnresolvableProfileBundles,
   resetPluginProfile
@@ -585,16 +595,38 @@ function attachWindowsMenuView(window: BrowserWindow): void {
 function configureAppIdentity(): void {
   if (developmentBuild) {
     app.setName('DSH Desktop Dev')
-    app.setPath('userData', join(app.getPath('appData'), 'dsh-desktop-dev'))
+    app.setPath('userData', bootstrapDirectory(app.getPath('appData'), true))
     return
   }
 
   app.setName('DSH Desktop')
-  // Keep the historical lowercase directory stable across product-name and
+  // The default directory stays lowercase and stable across product-name and
   // branding changes. Harness stores workspaces, sessions, credentials, and
   // custom presets below userData, so deriving this path from app.getName()
   // would make an ordinary upgrade look like a fresh installation.
-  app.setPath('userData', join(app.getPath('appData'), 'dsh-desktop'))
+  //
+  // A user-configured location is read from a pointer file kept in the default
+  // directory, since the app cannot look for that file inside the directory it
+  // is trying to choose. Electron derives logs, sessionData, and crashDumps
+  // from userData, so this single call relocates all of them.
+  const resolved = resolveDataLocation(bootstrapDirectory(app.getPath('appData'), false))
+  dataLocationState = resolved
+  app.setPath('userData', resolved.userDataPath)
+}
+
+/**
+ * What `configureAppIdentity` decided, kept for the settings UI. It has to be
+ * captured before the window opens because the renderer cannot read the pointer
+ * file itself.
+ */
+let dataLocationState: ResolvedDataLocation | undefined
+
+/**
+ * The bootstrap directory for this launch. The development build keeps its own,
+ * so a dev session cannot read or overwrite the installed app's choice.
+ */
+function currentBootstrapDirectory(): string {
+  return bootstrapDirectory(app.getPath('appData'), developmentBuild)
 }
 
 async function syncNativeTheme(window: BrowserWindow): Promise<void> {
@@ -1918,6 +1950,88 @@ function assertTrustedMainWindowEvent(event: IpcMainInvokeEvent): void {
   ) {
     throw new Error('This action is only available from the main DSH Desktop window.')
   }
+}
+
+/**
+ * Reports the effective data directory to the settings UI.
+ *
+ * The current path is read from `app.getPath('userData')` rather than from the
+ * stored record, so the UI always shows where data actually is. When the stored
+ * location failed validation and the default directory was substituted, the
+ * warning explains the discrepancy instead of silently showing the default.
+ */
+function describeDataLocation(): DataLocationSnapshot {
+  const bootstrapDir = currentBootstrapDirectory()
+  const resolved = dataLocationState ?? resolveDataLocation(bootstrapDir)
+  return {
+    currentPath: app.getPath('userData'),
+    defaultPath: bootstrapDir,
+    custom: resolved.custom,
+    ...(resolved.warning
+      ? { warning: { configuredPath: resolved.warning.configuredPath, reason: resolved.warning.failure } }
+      : {})
+  }
+}
+
+/**
+ * Restarts so a new data directory takes effect.
+ *
+ * Relaunching is the only way to apply the change: Electron fixes `userData`
+ * before the Harness process starts and before the profile layout is derived
+ * from it, so no amount of re-reading the pointer mid-session can move it.
+ *
+ * The Harness child is stopped first rather than exiting straight away. It is
+ * spawned detached, so an abrupt `app.exit` can leave it holding the loopback
+ * port that the next launch needs.
+ */
+async function relaunchForDataLocation(): Promise<void> {
+  quitting = true
+  desktopStorageManager?.flushSync()
+  stopUpdateManager()
+  if (tray && !tray.isDestroyed()) tray.destroy()
+  tray = undefined
+  repairAgentService?.dispose()
+  repairAgentService = undefined
+  desktopDiagnostics?.markCleanExit()
+  await Promise.all([runtime?.stop(), mobileBridge?.stop()]).catch(() => undefined)
+  app.relaunch()
+  app.exit(0)
+}
+
+/**
+ * Prompts for a new data directory and persists the choice.
+ *
+ * Nothing is moved: the selected directory starts empty and the previous one is
+ * left untouched, so a mistaken choice costs a restart rather than a migration.
+ * The pointer file lives in the default directory, which is why the choice
+ * survives even though the new directory has no configuration in it yet.
+ */
+async function chooseDataLocation(): Promise<DataLocationChoice> {
+  const window = mainWindow
+  if (!window || window.isDestroyed()) throw new Error('No window is available for the directory picker.')
+
+  const result = await dialog.showOpenDialog(window, {
+    title: harnessLocale() === 'zh' ? '选择数据目录' : 'Select Data Directory',
+    properties: ['openDirectory', 'createDirectory']
+  })
+  if (result.canceled || result.filePaths.length === 0) return { status: 'cancelled' }
+
+  const candidate = result.filePaths[0]
+  if (candidate === undefined) return { status: 'cancelled' }
+
+  const validated = validateDataDirectory(candidate)
+  if (!validated.ok) return { status: 'invalid', reason: validated.reason }
+
+  const bootstrapDir = currentBootstrapDirectory()
+  if (validated.path === bootstrapDir) {
+    await clearDataLocationRecord(bootstrapDir)
+    dataLocationState = resolveDataLocation(bootstrapDir)
+    return { status: 'unchanged', snapshot: describeDataLocation() }
+  }
+
+  await writeDataLocationRecord(bootstrapDir, validated.path)
+  dataLocationState = resolveDataLocation(bootstrapDir)
+  return { status: 'saved', snapshot: describeDataLocation(), restartRequired: true }
 }
 
 /**
@@ -3473,6 +3587,29 @@ async function bootstrap(): Promise<void> {
       properties: ['openDirectory']
     })
     return result.canceled ? null : result.filePaths[0] ?? null
+  })
+  ipcMain.removeHandler('data-location:get')
+  ipcMain.handle('data-location:get', (event) => {
+    assertTrustedMainWindowEvent(event)
+    return describeDataLocation()
+  })
+  ipcMain.removeHandler('data-location:choose')
+  ipcMain.handle('data-location:choose', async (event) => {
+    assertTrustedMainWindowEvent(event)
+    return chooseDataLocation()
+  })
+  ipcMain.removeHandler('data-location:reset')
+  ipcMain.handle('data-location:reset', async (event) => {
+    assertTrustedMainWindowEvent(event)
+    const bootstrapDir = currentBootstrapDirectory()
+    await clearDataLocationRecord(bootstrapDir)
+    dataLocationState = resolveDataLocation(bootstrapDir)
+    return describeDataLocation()
+  })
+  ipcMain.removeHandler('data-location:restart')
+  ipcMain.handle('data-location:restart', async (event) => {
+    assertTrustedMainWindowEvent(event)
+    await relaunchForDataLocation()
   })
   ipcMain.handle('mobile:open-pairing', () => showMobilePairing())
   ipcMain.handle('mobile:status', () => ({ connected: mobileBridge.snapshot().connected }))
