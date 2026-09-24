@@ -82,7 +82,14 @@ export async function prepareHostPluginSourcesPatch(
   )
   const names = hostPluginNames(source)
   if (names.length === 0 && source === original) return desktopPatchPath
-  const appManifest = join(dirname(desktopPatchPath), '..', 'package.json')
+  // The patch sits in `resources/` while the app manifest is in
+  // `resources/app/`, so the resolution base is the `app` directory rather than
+  // its parent. Resolving from `resources/` finds no manifest and walks up to
+  // whatever `node_modules` happens to exist above the install root — which is
+  // nothing on a normal machine, and the developer's own source tree during a
+  // local run, where it silently resolves the plugins out of `packages/`
+  // instead of the packaged copies.
+  const appManifest = join(dirname(desktopPatchPath), 'app', 'package.json')
   const resolveHost = createRequire(appManifest).resolve
   let text = source
   for (const { name, start, end } of names.reverse()) {

@@ -83,4 +83,39 @@ describe('Desktop host plugin sources', () => {
     expect(parse(await readFile(outputPath, 'utf8'))).toEqual([])
     expect(await readFile(patchPath, 'utf8')).toContain('dsh-image-generation')
   })
+
+  /**
+   * The packaged layout puts the patch in `resources/` and the app manifest in
+   * `resources/app/`. Resolving from the patch's parent finds no manifest and
+   * walks up past the install root, which on a developer machine reaches the
+   * source tree's own `node_modules` — so the plugins silently resolved out of
+   * `packages/` instead of the packaged copies, and an installed build failed
+   * to start where no such ancestor exists.
+   */
+  it('resolves host sources from the packaged layout, not an ancestor install', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-host-sources-'))
+    directories.push(root)
+    const resources = join(root, 'resources')
+    const app = join(resources, 'app')
+    const home = join(root, 'home')
+    const patchPath = join(resources, 'dsh-desktop.patch.yml')
+    await mkdir(join(app, 'node_modules', 'host-packaged'), { recursive: true })
+    await mkdir(home)
+    await writeFile(join(app, 'package.json'), '{"name":"test-desktop"}\n')
+    await writeFile(
+      join(app, 'node_modules', 'host-packaged', 'package.json'),
+      JSON.stringify({ name: 'host-packaged', main: 'index.js' })
+    )
+    const entry = join(app, 'node_modules', 'host-packaged', 'index.js')
+    await writeFile(entry, "module.exports = 'host-packaged'\n")
+    await writeFile(patchPath, '- insert:\n    - id: packaged\n      name: host-packaged\n')
+
+    const output = await readFile(await prepareHostPluginSourcesPatch(home, patchPath), 'utf8')
+    const rows = parse(output, { logLevel: 'silent' }) as { insert?: { name: string }[] }[]
+    const resolved = rows[0]?.insert?.[0]?.name ?? ''
+
+    // The packaged copy, not anything reached by walking up from `resources/`.
+    expect(resolved).toBe(pathToFileURL(await realpath(entry)).href)
+    expect(resolved).toContain('/resources/app/node_modules/')
+  })
 })
