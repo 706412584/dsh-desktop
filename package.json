@@ -270,6 +270,7 @@
     "@deepseek-ai/dsh-workspace": "0.1.5-rc.2",
     "@deepseek-ai/schemastery": "3.18.2",
     "dsh-desktop-client-ui": "file:packages/dsh-desktop-client-ui",
+    "dsh-desktop-data-location": "file:packages/dsh-desktop-data-location",
     "dsh-desktop-hmr-fallback": "file:packages/dsh-desktop-hmr-fallback",
     "dsh-desktop-log-bridge": "file:packages/dsh-desktop-log-bridge",
     "dsh-desktop-market-installer": "file:packages/dsh-desktop-market-installer",
@@ -303,6 +304,9 @@
   "build": {
     "appId": "io.dsh.desktop",
     "productName": "DSH Desktop",
+    "extraMetadata": {
+      "dshDesktopUpdateFeed": "disabled"
+    },
     "asar": false,
     "npmRebuild": false,
     "compression": "maximum",
