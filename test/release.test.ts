@@ -545,3 +545,65 @@ describe('AI-organized GitHub release body', () => {
     expect(notes.startsWith('# ')).toBe(true)
   })
 })
+
+/**
+ * Producing the real package otherwise requires the UKey signing runner that
+ * only the maintainer owns, so an unsigned dispatch builds the release artifact
+ * on a hosted runner and skips every signing and publishing step.
+ */
+describe('unsigned release dispatch', () => {
+  const load = () =>
+    readFile(path.join(projectRoot, '.github/workflows/release.yml'), 'utf8')
+
+  it('offers an unsigned mode that takes a version', async () => {
+    const yml = await load()
+    expect(yml).toContain('- unsigned')
+    expect(yml).toContain('unsigned_version:')
+    expect(yml).toContain('unsigned mode requires unsigned_version')
+  })
+
+  it('builds the release package, not the development one', async () => {
+    const yml = await load()
+    const buildStep = yml.slice(
+      yml.indexOf('Build Windows release package'),
+      yml.indexOf('Build isolated Windows development package')
+    )
+    expect(buildStep).toContain("inputs.mode == 'unsigned'")
+    expect(buildStep).toContain('npm run package:win')
+
+    // The dev package step must stay exclusive to development mode.
+    const devStep = yml.slice(
+      yml.indexOf('Build isolated Windows development package'),
+      yml.indexOf('Smoke test packaged Windows Harness')
+    )
+    expect(devStep).not.toContain("inputs.mode == 'unsigned'")
+  })
+
+  it('uploads the unsigned release installer as an artifact', async () => {
+    const yml = await load()
+    const idx = yml.indexOf('windows-x64-release-unsigned')
+    expect(idx).toBeGreaterThan(-1)
+    const step = yml.slice(Math.max(0, idx - 400), idx + 200)
+    expect(step).toContain("inputs.mode == 'unsigned'")
+    expect(step).toContain('dist/dsh-desktop-windows-x64-setup.exe')
+  })
+
+  it('never routes an unsigned build through signing or macOS release jobs', async () => {
+    const yml = await load()
+
+    // sign-windows needs a self-hosted runner this fork does not have, so an
+    // unsigned build must not wait on it.
+    const signWindows = yml.slice(
+      yml.indexOf('\n  sign-windows:'),
+      yml.indexOf('\n  publish:')
+    )
+    expect(signWindows).not.toContain("inputs.mode == 'unsigned'")
+
+    // The macOS release jobs need Apple credentials, so unsigned skips them.
+    for (const job of ['\n  macos-apple-silicon:', '\n  macos-intel:']) {
+      const start = yml.indexOf(job)
+      const gate = yml.slice(start, yml.indexOf('runs-on:', start))
+      expect(gate).toContain("inputs.mode != 'unsigned'")
+    }
+  })
+})
