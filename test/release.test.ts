@@ -663,11 +663,12 @@ describe('unsigned release dispatch', () => {
     const yml = await load()
 
     // sign-windows needs a self-hosted runner this fork does not have, so an
-    // unsigned build must not wait on it.
-    const signWindows = yml.slice(
-      yml.indexOf('\n  sign-windows:'),
-      yml.indexOf('\n  publish:')
-    )
+    // unsigned build must not wait on it. Bound the slice to that one job: a
+    // wider window would also span the smoke jobs and could pass even if the
+    // gate were added to the wrong one.
+    const signStart = yml.indexOf('\n  sign-windows:')
+    const signWindows = yml.slice(signStart, yml.indexOf('\n  smoke-signed-windows:', signStart))
+    expect(signWindows).toContain("inputs.mode == 'signed' || inputs.mode == 'prerelease'")
     expect(signWindows).not.toContain("inputs.mode == 'unsigned'")
 
     // The macOS release job needs Apple credentials, so unsigned skips it.
