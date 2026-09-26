@@ -1,4 +1,6 @@
 import { initializeDesktopService, desktopDiagnostics } from './desktop-service'
+import { applyMacosWindowBackdrop } from './macos-window-backdrop'
+import { runtimePackageRoot } from './runtime-package-root'
 import { checkBlockingPluginUpdates, selectPluginRecoveryTarget, PluginRecoveryEvidence, planPluginRecovery, runPluginRecoveryPlan, type PluginRecoveryCheck } from './plugin-recovery-market'
 import { RepairAgentService, type CrashEvidence } from './repair-agent'
 import { spawn } from 'node:child_process'
@@ -105,6 +107,7 @@ import {
   resetPluginProfile
 } from './state/plugin-recovery'
 import { ensureSafeModeProfile, SAFE_MODE_PROFILE } from './state/safe-mode-profile'
+import { migrateLegacyAgentPresets } from './state/legacy-preset-migration'
 import { WindowStateManager } from './state/window-state'
 import {
   isProjectedGenerationPlugin,
@@ -509,7 +512,8 @@ function windowsTitleBarOverlay(isDark: boolean): Electron.TitleBarOverlayOption
 
 function applyWindowChromeTheme(window: BrowserWindow, isDark: boolean): void {
   if (window.isDestroyed()) return
-  window.setBackgroundColor(isDark ? '#141416' : '#ffffff')
+  if (process.platform === 'darwin') applyMacosWindowBackdrop(window, isDark)
+  else window.setBackgroundColor(isDark ? '#141416' : '#ffffff')
   if (process.platform === 'win32') {
     windowsMenuDark = isDark
     window.setTitleBarOverlay(windowsTitleBarOverlay(isDark))
@@ -632,34 +636,11 @@ function currentBootstrapDirectory(): string {
 async function syncNativeTheme(window: BrowserWindow): Promise<void> {
   if (window.isDestroyed()) return
 
-  // The sidebar already reserves enough room for macOS traffic lights. Read
-  // Harness's resolved theme before showing the window so the native surface
-  // matches the first rendered frame. The transparent drag strip restores the
-  // native window gesture without adding a visual titlebar or covering the
-  // traffic lights and right-side header actions.
+  // Harness's marked chrome rows own window dragging. Its resolved body theme
+  // also works when macOS renders a transparent page over native vibrancy.
   const isDark = await window.webContents.executeJavaScript(
     `(() => {
-      if (${process.platform === 'darwin'}) {
-        let dragRegion = document.getElementById('dsh-desktop-drag-region')
-        if (!dragRegion) {
-          dragRegion = document.createElement('div')
-          dragRegion.id = 'dsh-desktop-drag-region'
-          dragRegion.setAttribute('aria-hidden', 'true')
-          Object.assign(dragRegion.style, {
-            position: 'fixed',
-            zIndex: '18',
-            top: '0',
-            left: '80px',
-            right: '220px',
-            height: '24px',
-            background: 'transparent',
-            pointerEvents: 'auto',
-            userSelect: 'none'
-          })
-          dragRegion.style.setProperty('-webkit-app-region', 'drag')
-          document.body.appendChild(dragRegion)
-        }
-      }
+      if (${process.platform === 'darwin'}) return document.body.hasAttribute('data-ds-dark-theme')
       if (document.body.hasAttribute('data-ds-dark-theme')) return true
       const color = getComputedStyle(document.body).backgroundColor
       const channels = color.match(/[\\d.]+/g)?.slice(0, 3).map(Number)
@@ -673,24 +654,17 @@ async function syncNativeTheme(window: BrowserWindow): Promise<void> {
   applyWindowChromeTheme(window, isDark)
 }
 
+function bundledRuntimeRoot(): string {
+  return runtimePackageRoot(app.getAppPath(), app.isPackaged)
+}
+
 function dshEntryPath(): string {
-  if (app.isPackaged) {
-    return join(
-      process.resourcesPath,
-      'app',
-      'node_modules',
-      '@deepseek-ai',
-      'dsh',
-      'lib',
-      'bin.js'
-    )
-  }
-  return join(app.getAppPath(), 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
+  return join(bundledRuntimeRoot(), 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
 }
 
 function bundledNodePath(): string {
   const executable = process.platform === 'win32' ? 'node.exe' : 'node'
-  return join(app.getAppPath(), 'node_modules', 'node', 'bin', executable)
+  return join(bundledRuntimeRoot(), 'node_modules', 'node', 'bin', executable)
 }
 
 /**
@@ -701,7 +675,7 @@ function bundledNodePath(): string {
  */
 function bundledPnpmRunnerPath(): string {
   return join(
-    app.getAppPath(),
+    bundledRuntimeRoot(),
     'node_modules',
     'dsh-desktop-market-installer',
     'pnpm-runner.mjs'
@@ -709,7 +683,7 @@ function bundledPnpmRunnerPath(): string {
 }
 
 function bundledPnpmEntryPath(): string {
-  const root = join(app.getAppPath(), 'node_modules', 'pnpm', 'bin')
+  const root = join(bundledRuntimeRoot(), 'node_modules', 'pnpm', 'bin')
   const candidates = [join(root, 'pnpm.cjs'), join(root, 'pnpm.mjs')]
   return candidates.find((candidate) => existsSync(candidate)) ?? join(root, 'pnpm.cjs')
 }
@@ -752,7 +726,7 @@ function desktopIconPath(): string {
 
 function dshBrandLogoPath(variant: 'light' | 'dark'): string {
   return join(
-    app.getAppPath(),
+    bundledRuntimeRoot(),
     'node_modules',
     '@deepseek-ai',
     'dsh-web-frontend',
@@ -1094,8 +1068,12 @@ function createWindow(): BrowserWindow {
     show: false,
     title: '',
     icon: desktopIconPath(),
-    frame: process.platform !== 'darwin',
-    ...(process.platform === 'darwin' ? { titleBarStyle: 'hidden' as const } : {}),
+    ...(process.platform === 'darwin' ? {
+      titleBarStyle: 'hiddenInset' as const,
+      trafficLightPosition: { x: 16, y: 18 },
+      vibrancy: 'sidebar' as const,
+      visualEffectState: 'active' as const
+    } : {}),
     ...(isWindows
       ? {
         titleBarStyle: 'hidden' as const,
@@ -1103,7 +1081,7 @@ function createWindow(): BrowserWindow {
         autoHideMenuBar: true
       }
       : {}),
-    backgroundColor: nativeTheme.shouldUseDarkColors ? '#141416' : '#f8f8f6',
+    backgroundColor: process.platform === 'darwin' ? '#00000000' : nativeTheme.shouldUseDarkColors ? '#141416' : '#f8f8f6',
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -1114,18 +1092,18 @@ function createWindow(): BrowserWindow {
   })
   if (process.platform === 'darwin') {
     window.setWindowButtonVisibility(true)
-    // Match the sidebar inset at the current zoom, with a 2px optical correction
-    // for the round native buttons relative to the logo's visible left edge.
-    const alignWindowButtons = (): void => {
+    const applyBackdrop = (): void => applyMacosWindowBackdrop(window, nativeTheme.shouldUseDarkColors)
+    window.on('minimize', applyBackdrop)
+    window.on('hide', applyBackdrop)
+    window.on('restore', applyBackdrop)
+    window.on('show', applyBackdrop)
+    const syncFullscreen = (): void => {
       if (window.isDestroyed()) return
-      window.setWindowButtonPosition({
-        x: Math.round(16 * window.webContents.getZoomFactor()) - 2,
-        y: 9
-      })
+      window.webContents.send('dsh-desktop:window-fullscreen', window.isFullScreen())
     }
-    alignWindowButtons()
-    window.webContents.on('did-finish-load', alignWindowButtons)
-    window.webContents.on('zoom-changed', () => setImmediate(alignWindowButtons))
+    window.webContents.on('did-finish-load', syncFullscreen)
+    window.on('enter-full-screen', syncFullscreen)
+    window.on('leave-full-screen', syncFullscreen)
   } else if (isWindows) {
     window.setMenuBarVisibility(false)
   }
@@ -1591,7 +1569,10 @@ function launchHarness(): Promise<void> {
         )
       })
     desktopStorageManager?.switchProfile(join(dshHome, 'profiles', 'web'))
+    runtime.note('[desktop] starting preset migrations')
     await migratePersonaPrefixesBeforeStart(dshHome)
+    await migrateLegacyAgentPresets(dshHome, (line) => runtime.note(line))
+    runtime.note('[desktop] preset migrations done; starting Harness')
     await runtime.start(launchDirectory)
 
     // A failed launch must not rewrite the user's enabled plugin set. Recovery
@@ -1908,7 +1889,7 @@ function registerHarnessHandlers(): void {
     return {
       desktopVersion: app.getVersion(),
       harnessVersion:
-        bundledHarnessVersion(app.getAppPath()) ?? (locale === 'zh' ? '未知' : 'Unknown'),
+        bundledHarnessVersion(bundledRuntimeRoot()) ?? (locale === 'zh' ? '未知' : 'Unknown'),
       locale
     }
   })
@@ -2052,7 +2033,7 @@ async function showAbout(window: BrowserWindow): Promise<void> {
   const info = {
     desktopVersion: app.getVersion(),
     harnessVersion:
-      bundledHarnessVersion(app.getAppPath()) ?? (locale === 'zh' ? '未知' : 'Unknown'),
+      bundledHarnessVersion(bundledRuntimeRoot()) ?? (locale === 'zh' ? '未知' : 'Unknown'),
     locale
   }
   if (window && !window.isDestroyed() && window.webContents && !window.webContents.isDestroyed()) {
@@ -2071,7 +2052,7 @@ async function showAbout(window: BrowserWindow): Promise<void> {
     message: locale === 'zh' ? '关于 DSH Desktop' : 'About DSH Desktop',
     detail: aboutDetail(
       app.getVersion(),
-      bundledHarnessVersion(app.getAppPath()),
+      bundledHarnessVersion(bundledRuntimeRoot()),
       locale
     ),
     buttons: [checkForUpdatesLabel, locale === 'zh' ? '关闭' : 'Close'],
@@ -2218,6 +2199,8 @@ async function waitForPluginRecoveryAction(options: {
 
 function showUnexpectedError(error: unknown): void {
   const message = error instanceof Error ? error.stack ?? error.message : String(error)
+  runtime?.note(`[desktop] unexpected error: ${message}`)
+  console.error('[desktop] unexpected error:', message)
   dialog.showErrorBox('DSH Desktop encountered an error', message)
 }
 
@@ -2275,7 +2258,7 @@ async function showPluginRecovery(options?: {
         startupFailures: followRendererLogs ? undefined : snapshot.pluginFailures,
         readLatestLogs: followRendererLogs ? () => rendererPluginFailureLogs : undefined,
         excludedPlugins: removedPlugins,
-        slotProviderNodeModulesPaths: [join(app.getAppPath(), 'node_modules')],
+        slotProviderNodeModulesPaths: [join(bundledRuntimeRoot(), 'node_modules')],
         timeoutMs: waitForRendererEvidence ? PLUGIN_RECOVERY_EVIDENCE_TIMEOUT_MS : 0
       })
       detection.plugins = evidence.targets(detection.plugins, removedPlugins)
@@ -2308,7 +2291,7 @@ async function showPluginRecovery(options?: {
       if (applyPendingFrontendEvidence()) continue
 
       const runtimeVersion =
-        (await readBundledDshVersion(join(app.getAppPath(), 'node_modules'))) || '0.1.2-alpha.1'
+        (await readBundledDshVersion(join(bundledRuntimeRoot(), 'node_modules'))) || '0.1.2-alpha.1'
       const pluginChecks = await checkBlockingPluginUpdates({
         plugins: detection.plugins,
         attemptedUpgrades,
@@ -2506,7 +2489,7 @@ async function showPluginRecovery(options?: {
 
         const compatibility = await inspectProfileCompatibility(
           dshHome,
-          join(app.getAppPath(), 'node_modules')
+          join(bundledRuntimeRoot(), 'node_modules')
         )
         evidence.inspect(compatibility.issues)
         const blockingIssues = compatibility.issues.filter((issue) => issue.severity === 'blocking')
@@ -2569,7 +2552,7 @@ async function showPluginRecovery(options?: {
         }
         const compatibility = await inspectProfileCompatibility(
           dshHome,
-          join(app.getAppPath(), 'node_modules')
+          join(bundledRuntimeRoot(), 'node_modules')
         )
         evidence.inspect(compatibility.issues)
         const blockingIssues = compatibility.issues.filter((issue) => issue.severity === 'blocking')
@@ -2831,7 +2814,7 @@ async function removeProfilePluginCompletely(
       await markProfileInstallComplete(dshHome)
       const compatibility = await inspectProfileCompatibility(
         dshHome,
-        join(app.getAppPath(), 'node_modules')
+        join(bundledRuntimeRoot(), 'node_modules')
       )
       runtime.note(
         `[${logPrefix}] rebuilt the web profile after removing ${pluginName}; ` +
@@ -2908,7 +2891,7 @@ async function showSafeModeManager(initial?: {
           pendingRemovals = await listPendingPluginRemovals(dshHome)
           compatibility = await inspectProfileCompatibility(
             dshHome,
-            join(app.getAppPath(), 'node_modules')
+            join(bundledRuntimeRoot(), 'node_modules')
           )
         }
       } catch (error) {
@@ -2940,7 +2923,7 @@ async function showSafeModeManager(initial?: {
         healthCheck = checkupAllProfilePlugins({
           plugins: active,
           dshHome,
-          bundledNodeModulesPath: join(app.getAppPath(), 'node_modules'),
+          bundledNodeModulesPath: join(bundledRuntimeRoot(), 'node_modules'),
           incompatiblePlugins: [...new Set([...safeModeSuspectedPlugins, ...incompatiblePluginNames])],
           failureTtlMs: SAFE_MODE_MARKET_FAILURE_TTL_MS,
           fetchFn: (input, init) => net.fetch(input instanceof URL ? input.href : input, init),
@@ -3566,7 +3549,7 @@ async function bootstrap(): Promise<void> {
     },
     workspaceDirectory: join(app.getPath('userData'), 'harness'),
     harnessLogPath: join(app.getPath('logs'), 'harness.log'),
-    shippedPresetsDirectory: join(app.getAppPath(), 'node_modules', '@deepseek-ai', 'dsh-agent-presets', 'presets'),
+    shippedPresetsDirectory: join(bundledRuntimeRoot(), 'node_modules', '@deepseek-ai', 'dsh-agent-presets', 'presets'),
     locale: harnessLocale,
     crashEvidence: () => lastCrashEvidence,
     appVersion: () => app.getVersion()
@@ -3780,7 +3763,7 @@ async function bootstrap(): Promise<void> {
     }
     const compatibility = await inspectProfileCompatibility(
       dshHome,
-      join(app.getAppPath(), 'node_modules')
+      join(bundledRuntimeRoot(), 'node_modules')
     )
     if (compatibility.issues.some((issue) => issue.severity === 'blocking')) {
       void showSafeModeManager().catch(showUnexpectedError)
